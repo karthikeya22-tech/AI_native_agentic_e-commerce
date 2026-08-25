@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     SUPABASE_SERVICE_ROLE_KEY: str
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
+    LLM_API_KEY: str = ""
+    LLM_MODEL: str = "gpt-4o-mini"
+    LLM_BASE_URL: str = "https://api.openai.com/v1"
+    LLM_TIMEOUT_SECONDS: float = 30.0
+
     class Config:
         env_file = str(ENV_PATH)
         env_file_encoding = "utf-8"

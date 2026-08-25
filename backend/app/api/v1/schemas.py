@@ -1,4 +1,10 @@
-from pydantic import BaseModel, EmailStr
+from datetime import datetime
+from decimal import Decimal
+from uuid import UUID
+
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class MerchantOnboardingRequest(BaseModel):
@@ -13,3 +19,60 @@ class MerchantOnboardingResponse(BaseModel):
     merchant_id: str
     name: str
     status: str
+
+
+class ProductCreate(BaseModel):
+    name: str
+    description: str
+    category: str
+    price: Decimal = Field(ge=0)
+    currency: str = "INR"
+    inventory_quantity: int = Field(default=0, ge=0)
+    delivery_info: dict | None = None
+    return_policy: str | None = None
+
+
+class ProductResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    description: str
+    category: str
+    price: Decimal
+    currency: str
+    inventory_quantity: int
+    delivery_info: dict | None = None
+    return_policy: str | None = None
+    is_active: bool
+    created_at: datetime
+
+
+class ReadinessIssue(BaseModel):
+    product_id: str
+    product_name: str
+    issue_type: str
+    description: str
+    severity: Literal["low", "medium", "high"]
+    suggested_action: str
+
+
+class ReadinessResponse(BaseModel):
+    merchant_id: str
+    overall_score: int
+    products_analyzed: int
+    issues_count: int
+    issues: list[ReadinessIssue]
+
+
+class GrowthRecommendation(BaseModel):
+    title: str
+    explanation: str
+    suggested_action: str
+    expected_impact: str
+    priority: Literal["low", "medium", "high"]
+
+
+class GrowthRecommendationsResponse(BaseModel):
+    merchant_id: str
+    recommendations: list[GrowthRecommendation]
