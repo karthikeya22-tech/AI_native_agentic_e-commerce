@@ -7,6 +7,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
+from app.models.merchant import MerchantStatus
+
+
 class MerchantOnboardingRequest(BaseModel):
     email: EmailStr
     name: str
@@ -19,6 +22,16 @@ class MerchantOnboardingResponse(BaseModel):
     merchant_id: str
     name: str
     status: str
+
+
+class MerchantSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    category: str
+    description: str | None = None
+    status: MerchantStatus
 
 
 class ProductCreate(BaseModel):
@@ -76,3 +89,17 @@ class GrowthRecommendation(BaseModel):
 class GrowthRecommendationsResponse(BaseModel):
     merchant_id: str
     recommendations: list[GrowthRecommendation]
+
+
+class BuyerIntentRequest(BaseModel):
+    message: str = Field(min_length=1)
+
+
+class BuyerIntentResponse(BaseModel):
+    category: str | None = None
+    budget_min: float | None = None
+    budget_max: float | None = None
+    use_case: str | None = None
+    requirements: list[str] = []
+    preferences: list[str] = []
+    brand: str | None = None

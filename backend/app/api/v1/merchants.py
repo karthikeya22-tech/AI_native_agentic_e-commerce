@@ -15,6 +15,7 @@ from app.api.v1.schemas import (
     GrowthRecommendationsResponse,
     MerchantOnboardingRequest,
     MerchantOnboardingResponse,
+    MerchantSummary,
     ProductCreate,
     ProductResponse,
     ReadinessResponse,
@@ -24,6 +25,21 @@ from app.models.merchant import Merchant, MerchantStatus
 from app.models.product import Product
 
 router = APIRouter(prefix="/api/v1", tags=["merchants"])
+
+
+@router.get(
+    "/merchants",
+    response_model=list[MerchantSummary],
+)
+def list_active_merchants(
+    db: Session = Depends(get_db),
+) -> list[MerchantSummary]:
+    merchants = (
+        db.query(Merchant)
+        .filter(Merchant.status == MerchantStatus.ACTIVE)
+        .all()
+    )
+    return [MerchantSummary.model_validate(m) for m in merchants]
 
 
 @router.post(

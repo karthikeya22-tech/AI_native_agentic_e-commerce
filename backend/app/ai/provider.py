@@ -7,6 +7,7 @@ httpx. Credentials are read from environment variables only.
 """
 
 import json
+import re
 from typing import Any, Protocol
 
 import httpx
@@ -98,10 +99,30 @@ def get_llm_provider() -> LLMProvider:
     return OpenAICompatibleProvider()
 
 
+_FENCED_JSON_PATTERN = re.compile(
+    r"^\s*```(?:json)?\s*\n(?P<content>.*)\n\s*```\s*$",
+    re.DOTALL,
+)
+
+
 def parse_json_response(raw: str) -> dict:
-    """Parse a JSON object out of a raw completion string."""
+    """Parse a JSON object out of a raw completion string.
+
+    Accepts raw JSON objects and JSON wrapped in Markdown code fences
+    (``` or ```json). Arbitrary prose is never accepted; if the content
+    is still not valid JSON, LLMRequestError is raised.
+    """
+    if not isinstance(raw, str):
+        raise LLMRequestError("LLM response was not text.")
+
+    candidate = raw.strip()
+
+    match = _FENCED_JSON_PATTERN.match(candidate)
+    if match:
+        candidate = match.group("content").strip()
+
     try:
-        value = json.loads(raw)
+        value = json.loads(candidate)
     except json.JSONDecodeError as exc:
         raise LLMRequestError("LLM returned invalid JSON.") from exc
     if not isinstance(value, dict):
