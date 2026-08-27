@@ -1,37 +1,95 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import Link from "next/link";
-
-interface ChatMessage {
-  id: string;
-  role: "buyer" | "merchant";
-  text: string;
-}
+import { useBuyerChat } from "@/hooks/useBuyerChat";
+import type { ChatMessage, BuyerChatProduct } from "@/types/buyer-chat";
 
 const FALLBACK_MERCHANT_NAME = "the store";
 
+function ProductCard({ product }: { product: BuyerChatProduct }) {
+  const formattedPrice = new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: product.currency,
+  }).format(parseFloat(product.price));
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+      <p className="font-semibold text-slate-900">{product.name}</p>
+      <p className="mt-1 text-sm text-slate-600">
+        {formattedPrice}
+      </p>
+      <p className="mt-1 text-xs text-slate-400">
+        Relevance: {Math.round(product.similarity * 100)}%
+      </p>
+    </div>
+  );
+}
+
+function TypingIndicator() {
+  return (
+    <li className="flex justify-start">
+      <span className="inline-flex items-center gap-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
+        <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:-0.3s]" />
+        <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:-0.15s]" />
+        <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400" />
+      </span>
+    </li>
+  );
+}
+
 export default function BuyerChatPage() {
+  const [merchantId, setMerchantId] = useState("");
   const [merchantName, setMerchantName] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const { sendMessage, loading, error, resetError } = useBuyerChat();
 
   useEffect(() => {
+    setMerchantId(sessionStorage.getItem("buyer_merchant_id") ?? "");
     setMerchantName(
-      sessionStorage.getItem("buyer_merchant_name") ??
-        FALLBACK_MERCHANT_NAME
+      sessionStorage.getItem("buyer_merchant_name") ?? FALLBACK_MERCHANT_NAME
     );
   }, []);
 
-  function handleSend() {
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  async function handleSend(e: React.FormEvent) {
+    e.preventDefault();
     const text = draft.trim();
-    if (!text) return;
+    if (!text || loading || !merchantId) return;
 
     setMessages((prev) => [
       ...prev,
       { id: crypto.randomUUID(), role: "buyer", text },
     ]);
     setDraft("");
+
+    try {
+      const response = await sendMessage(merchantId, text);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          text: response.message,
+          products: response.products,
+        },
+      ]);
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          text: "Sorry, something went wrong. Please try again.",
+        },
+      ]);
+    }
   }
 
   return (
@@ -61,7 +119,7 @@ export default function BuyerChatPage() {
       {/* Messages */}
       <div className="flex flex-1 flex-col overflow-y-auto px-6 py-8">
         <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col">
-          {messages.length === 0 ? (
+          {messages.length === 0 && !loading ? (
             <div className="m-auto max-w-md rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
               <p className="font-semibold text-slate-900">
                 Hi! How can I help you shop today?
@@ -81,45 +139,65 @@ export default function BuyerChatPage() {
                     message.role === "buyer" ? "justify-end" : "justify-start"
                   }`}
                 >
-                  <span
+                  <div
                     className={`max-w-sm rounded-2xl px-4 py-3 text-sm ${
                       message.role === "buyer"
                         ? "bg-indigo-600 text-white"
                         : "border border-slate-200 bg-white text-slate-700"
                     }`}
                   >
-                    {message.text}
-                  </span>
+                    <p>{message.text}</p>
+
+                    {message.products && message.products.length > 0 && (
+                      <div className="mt-3 space-y-2">
+                        {message.products.map((product) => (
+                          <ProductCard key={product.product_id} product={product} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </li>
               ))}
+
+              {loading && <TypingIndicator />}
+
+              <div ref={messagesEndRef} />
             </ul>
+          )}
+
+          {error && (
+            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-center">
+              <p className="text-sm text-red-700">{error}</p>
+              <button
+                type="button"
+                onClick={resetError}
+                className="mt-2 text-xs font-semibold text-red-600 underline hover:text-red-800"
+              >
+                Dismiss
+              </button>
+            </div>
           )}
         </div>
       </div>
 
       {/* Composer */}
       <footer className="border-t border-slate-200 bg-white px-6 py-4">
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSend();
-          }}
-          className="mx-auto flex max-w-3xl gap-3"
-        >
+        <form onSubmit={handleSend} className="mx-auto flex max-w-3xl gap-3">
           <input
             type="text"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder="Type a message..."
-            className="flex-1 rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+            disabled={loading || !merchantId}
+            className="flex-1 rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
           />
 
           <button
             type="submit"
             className="rounded-xl bg-indigo-600 px-5 py-3 font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={!draft.trim()}
+            disabled={!draft.trim() || loading || !merchantId}
           >
-            Send
+            {loading ? "Sending..." : "Send"}
           </button>
         </form>
       </footer>
