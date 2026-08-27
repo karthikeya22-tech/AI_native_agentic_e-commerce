@@ -16,6 +16,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
+from pgvector.sqlalchemy import Vector
 
 from app.db.session import Base
 
@@ -91,6 +92,16 @@ class Product(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+    # Searchable product content embedding (BAAI/bge-small-en-v1.5, 384 dims).
+    # Nullable because existing products do not have embeddings yet.
+    # NOTE: vector similarity is a retrieval signal only — no money action may
+    # depend directly on a similarity result without deterministic
+    # business-rule validation.
+    embedding = Column(
+        Vector(384),
+        nullable=True,
     )
 
     __table_args__ = (
