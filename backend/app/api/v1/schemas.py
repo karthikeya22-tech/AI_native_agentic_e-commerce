@@ -191,6 +191,33 @@ class GrowthOpportunitiesResponse(BaseModel):
     opportunities: list[GrowthOpportunity]
 
 
+class OpportunityApprovalRequest(BaseModel):
+    approved: bool
+    approved_by: str = Field(min_length=1)
+
+
+class OpportunityApprovalResponse(BaseModel):
+    opportunity_id: str
+    merchant_id: str
+    status: str
+    approved_by: str | None = None
+    approved_at: str | None = None
+    proposed_action: str
+    guardrails: list[str]
+
+
+class ExecutionGateResponse(BaseModel):
+    authorized: bool
+    merchant_id: str
+    opportunity_id: str
+    status: str
+    approved_by: str | None = None
+    approved_at: str | None = None
+    proposed_action: str
+    guardrails: list[str]
+    authorization_timestamp: str
+
+
 class BuyerChatRequest(BaseModel):
     merchant_id: UUID
     message: str = Field(min_length=1)

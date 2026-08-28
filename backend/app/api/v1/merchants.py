@@ -12,6 +12,15 @@ from app.ai.growth_service import (
     generate_recommendations,
 )
 from app.ai.provider import LLMError, LLMProvider, get_llm_provider
+from app.api.v1.approval_service import (
+    ApprovalError,
+    ExplicitConsentRequiredError,
+    InvalidTransitionError,
+    OpportunityNotFoundError,
+    WrongMerchantError,
+    approve_opportunity,
+    record_opportunity_created,
+)
 from app.api.v1.growth_opportunities_service import generate_growth_opportunities
 from app.api.v1.merchant_service import check_merchant_exists, create_merchant
 from app.api.v1.readiness_service import analyze_readiness
@@ -21,6 +30,8 @@ from app.api.v1.schemas import (
     MerchantOnboardingRequest,
     MerchantOnboardingResponse,
     MerchantSummary,
+    OpportunityApprovalRequest,
+    OpportunityApprovalResponse,
     ProductCreate,
     ProductResponse,
     ReadinessResponse,
@@ -259,7 +270,69 @@ def get_growth_opportunities(
             opportunities=[],
         )
 
+    # Register each opportunity in the approval store.
+    for opp in opportunities:
+        record_opportunity_created(
+            str(merchant_id),
+            opp["opportunity_id"],
+            opp["proposed_action"],
+            opp["guardrails"],
+        )
+
     return GrowthOpportunitiesResponse(
         merchant_id=str(merchant_id),
         opportunities=opportunities,
+    )
+
+
+@router.post(
+    "/merchants/{merchant_id}/growth-opportunities/{opportunity_id}/approve",
+    response_model=OpportunityApprovalResponse,
+)
+def approve_growth_opportunity(
+    merchant_id: UUID,
+    opportunity_id: str,
+    request: OpportunityApprovalRequest,
+) -> OpportunityApprovalResponse:
+    try:
+        record = approve_opportunity(
+            str(merchant_id),
+            opportunity_id,
+            approved=request.approved,
+            approved_by=request.approved_by,
+        )
+    except OpportunityNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opportunity not found",
+        )
+    except WrongMerchantError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opportunity not found",
+        )
+    except InvalidTransitionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        )
+    except ExplicitConsentRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+    except ApprovalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+    return OpportunityApprovalResponse(
+        opportunity_id=record["opportunity_id"],
+        merchant_id=record["merchant_id"],
+        status=record["status"],
+        approved_by=record["approved_by"],
+        approved_at=record["approved_at"],
+        proposed_action=record["proposed_action"],
+        guardrails=record["guardrails"],
     )
