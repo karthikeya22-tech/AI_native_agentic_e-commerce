@@ -1,17 +1,22 @@
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+logger = logging.getLogger(__name__)
+
 from app.ai.growth_service import (
     RecommendationGenerationError,
     generate_recommendations,
 )
 from app.ai.provider import LLMError, LLMProvider, get_llm_provider
+from app.api.v1.growth_opportunities_service import generate_growth_opportunities
 from app.api.v1.merchant_service import check_merchant_exists, create_merchant
 from app.api.v1.readiness_service import analyze_readiness
 from app.api.v1.schemas import (
+    GrowthOpportunitiesResponse,
     GrowthRecommendationsResponse,
     MerchantOnboardingRequest,
     MerchantOnboardingResponse,
@@ -216,4 +221,45 @@ def get_growth_recommendations(
     return GrowthRecommendationsResponse(
         merchant_id=str(merchant_id),
         recommendations=recommendations,
+    )
+
+
+@router.post(
+    "/merchants/{merchant_id}/growth-opportunities",
+    response_model=GrowthOpportunitiesResponse,
+)
+def get_growth_opportunities(
+    merchant_id: UUID,
+    db: Session = Depends(get_db),
+) -> GrowthOpportunitiesResponse:
+    merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
+    if merchant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+
+    products = (
+        db.query(Product)
+        .filter(Product.merchant_id == merchant_id)
+        .filter(Product.is_active.is_(True))
+        .all()
+    )
+
+    _, _, issues = analyze_readiness(products)
+
+    try:
+        opportunities = generate_growth_opportunities(
+            str(merchant_id), products, issues
+        )
+    except Exception:
+        logger.exception("Growth opportunity generation failed for merchant %s", merchant_id)
+        return GrowthOpportunitiesResponse(
+            merchant_id=str(merchant_id),
+            opportunities=[],
+        )
+
+    return GrowthOpportunitiesResponse(
+        merchant_id=str(merchant_id),
+        opportunities=opportunities,
     )

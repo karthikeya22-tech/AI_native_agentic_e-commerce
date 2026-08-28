@@ -73,6 +73,7 @@ def test_successful_intent_extraction():
         "requirements": ["16GB RAM"],
         "preferences": [],
         "brand": None,
+        "intent_source": "llm",
     }
     assert provider.call_count == 1
 

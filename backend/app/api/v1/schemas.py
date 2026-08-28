@@ -142,6 +142,55 @@ class BuyerSearchResponse(BaseModel):
     results: list[BuyerSearchResultItem]
 
 
+class OpportunityEvidence(BaseModel):
+    source: str
+    issue_type: str
+    product_id: str
+    product_name: str
+    severity: Literal["low", "medium", "high"]
+    description: str
+    suggested_action: str
+
+
+class FinancialImpact(BaseModel):
+    type: str
+    direction: str = "positive"
+    estimate: str
+    assumptions: list[str]
+
+
+class AuditInfo(BaseModel):
+    timestamp: str
+    signal_source: str
+    products_analyzed: int
+    issues_evaluated: int
+    generation_method: str
+    rule_version: str
+    affected_product_ids: list[str] = []
+    category: str
+    highest_severity: Literal["low", "medium", "high"]
+
+
+class GrowthOpportunity(BaseModel):
+    opportunity_id: str
+    merchant_id: str
+    title: str
+    problem: str
+    evidence: list[OpportunityEvidence]
+    financial_impact: FinancialImpact
+    proposed_action: str
+    guardrails: list[str]
+    approval_required: bool = True
+    status: str = "proposed"
+    reasoning: str
+    audit: AuditInfo
+
+
+class GrowthOpportunitiesResponse(BaseModel):
+    merchant_id: str
+    opportunities: list[GrowthOpportunity]
+
+
 class BuyerChatRequest(BaseModel):
     merchant_id: UUID
     message: str = Field(min_length=1)
