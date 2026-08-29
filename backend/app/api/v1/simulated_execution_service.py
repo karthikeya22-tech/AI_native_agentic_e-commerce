@@ -12,6 +12,9 @@ Every money action must be:
 - auditable (every state change logged)
 - failure-safe (returns safe error with no financial mutation)
 
+Audit events are delegated to the unified audit_service for a single,
+append-only, merchant-isolated audit trail.
+
 No LLM calls: all financial calculations are deterministic backend math.
 The LLM MUST NOT calculate discount percentages, amounts, or final prices.
 """
@@ -22,6 +25,8 @@ import threading
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from typing import Any
+
+from app.api.v1.audit_service import record_audit_event
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +43,6 @@ SUPPORTED_ACTION_TYPES = {"simulated_discount"}
 # ---------------------------------------------------------------------------
 
 _executions: dict[str, dict[str, Any]] = {}
-_execution_events: list[dict[str, Any]] = []
 _lock = threading.RLock()
 
 
@@ -46,7 +50,6 @@ def reset_executions() -> None:
     """Clear all in-memory execution state. For test isolation only."""
     with _lock:
         _executions.clear()
-        _execution_events.clear()
 
 
 def _now_iso() -> str:
@@ -70,24 +73,47 @@ def _record_event(
     execution_id: str | None = None,
     **extra: Any,
 ) -> None:
-    """Record an audit-friendly execution event."""
-    event = {
-        "event_type": event_type,
-        "merchant_id": merchant_id,
-        "opportunity_id": opportunity_id,
-        "execution_id": execution_id,
-        "timestamp": _now_iso(),
-        **extra,
-    }
-    with _lock:
-        _execution_events.append(event)
-    logger.info(
-        "execution_event: %s merchant=%s opp=%s exec=%s",
-        event_type,
-        merchant_id,
-        opportunity_id,
-        execution_id,
-    )
+    """Delegate audit recording to the unified audit_service."""
+    actor = "system"
+    status = ""
+    reason = ""
+
+    if event_type == "execution_requested":
+        status = "requested"
+        reason = "Simulated discount execution requested"
+    elif event_type == "execution_allowed":
+        status = "allowed"
+        reason = "Approval and guardrails validated"
+    elif event_type == "execution_denied":
+        status = "denied"
+        reason = extra.get("reason", "Execution denied by guardrails")
+    elif event_type == "simulated_action_completed":
+        status = "simulated"
+        reason = "Bounded simulated discount completed"
+    else:
+        reason = extra.get("reason", "")
+
+    metadata = {k: v for k, v in extra.items() if k != "reason"}
+    if execution_id:
+        metadata["execution_id"] = execution_id
+
+    try:
+        record_audit_event(
+            event_type=event_type,
+            merchant_id=merchant_id,
+            opportunity_id=opportunity_id,
+            actor=actor,
+            status=status,
+            reason=reason,
+            metadata=metadata,
+        )
+    except Exception:
+        logger.exception(
+            "audit_failure: Failed to record execution event %s for merchant=%s opp=%s",
+            event_type,
+            merchant_id,
+            opportunity_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -443,13 +469,25 @@ def get_execution_events(
     merchant_id: str | None = None,
     opportunity_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return execution audit events, optionally filtered."""
-    with _lock:
-        events = list(_execution_events)
+    """Return execution audit events, optionally filtered.
+
+    Delegates to the unified audit_service for a single source of truth.
+    """
+    from app.api.v1.audit_service import get_audit_events_for_merchant
 
     if merchant_id is not None:
-        events = [e for e in events if e["merchant_id"] == merchant_id]
-    if opportunity_id is not None:
-        events = [e for e in events if e["opportunity_id"] == opportunity_id]
-
-    return events
+        events = get_audit_events_for_merchant(
+            merchant_id,
+            opportunity_id=opportunity_id,
+            newest_first=False,
+            limit=10000,
+        )
+        # Filter to execution-related event types.
+        execution_types = {
+            "execution_requested",
+            "execution_allowed",
+            "execution_denied",
+            "simulated_action_completed",
+        }
+        return [e for e in events if e["event_type"] in execution_types]
+    return []

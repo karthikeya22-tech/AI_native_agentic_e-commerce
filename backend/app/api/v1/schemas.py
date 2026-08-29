@@ -1,8 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Any, Literal
 from uuid import UUID
-
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
@@ -241,6 +240,61 @@ class SimulatedExecutionResponse(BaseModel):
     approval_required: bool = True
     timestamp: str
     disclaimer: str
+
+
+# ---------------------------------------------------------------------------
+# Audit Trail schemas
+# ---------------------------------------------------------------------------
+
+
+class AuditEventMetadata(BaseModel):
+    """Additional structured data attached to an audit event.
+
+    This is an open dictionary — different event types carry different metadata.
+    Examples:
+        - opportunity_created: { proposed_action, guardrails }
+        - approval_granted: { approved_by, new_status }
+        - simulated_action_completed: { discount_amount, final_price, original_price }
+    """
+
+    class Config:
+        extra = "allow"
+
+    pass
+
+
+class AuditEvent(BaseModel):
+    """A single audit event in the decision chain."""
+
+    event_id: str
+    event_type: str
+    merchant_id: str
+    opportunity_id: str
+    timestamp: str
+    actor: Literal["system", "merchant", "agent"] = "system"
+    status: str = ""
+    reason: str = ""
+    metadata: dict[str, Any] = {}
+
+
+class AuditEventsListResponse(BaseModel):
+    """Paginated list of audit events for a merchant."""
+
+    merchant_id: str
+    events: list[AuditEvent]
+    total_count: int
+    limit: int
+    offset: int
+    newest_first: bool
+
+
+class AuditTrailResponse(BaseModel):
+    """Complete lifecycle audit trail for a single opportunity."""
+
+    merchant_id: str
+    opportunity_id: str
+    events: list[AuditEvent]
+    total_events: int
 
 
 class BuyerChatRequest(BaseModel):

@@ -22,6 +22,12 @@ from app.api.v1.approval_service import (
     get_approval,
     record_opportunity_created,
 )
+from app.api.v1.audit_service import (
+    count_audit_events,
+    get_audit_events_for_merchant,
+    get_audit_trail_for_opportunity,
+    record_audit_event,
+)
 from app.api.v1.simulated_execution_service import (
     ExecutionError,
     GuardrailViolationError,
@@ -38,6 +44,8 @@ from app.api.v1.growth_opportunities_service import generate_growth_opportunitie
 from app.api.v1.merchant_service import check_merchant_exists, create_merchant
 from app.api.v1.readiness_service import analyze_readiness
 from app.api.v1.schemas import (
+    AuditEventsListResponse,
+    AuditTrailResponse,
     GrowthOpportunitiesResponse,
     GrowthRecommendationsResponse,
     MerchantOnboardingRequest,
@@ -464,3 +472,95 @@ def execute_growth_opportunity(
         )
 
     return SimulatedExecutionResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# Audit Trail endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/merchants/{merchant_id}/audit-events",
+    response_model=AuditEventsListResponse,
+)
+def list_merchant_audit_events(
+    merchant_id: UUID,
+    opportunity_id: str | None = Query(None, description="Filter by opportunity ID"),
+    newest_first: bool = Query(True, description="Return events newest-first"),
+    limit: int = Query(100, ge=1, le=1000, description="Max events to return"),
+    offset: int = Query(0, ge=0, description="Events to skip for pagination"),
+    db: Session = Depends(get_db),
+) -> AuditEventsListResponse:
+    """List audit events for a merchant with pagination and optional filtering.
+
+    Supports chronological ordering, newest-first ordering, opportunity
+    filtering, and standard offset/limit pagination.
+    """
+    merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
+    if merchant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+
+    events = get_audit_events_for_merchant(
+        str(merchant_id),
+        opportunity_id=opportunity_id,
+        newest_first=newest_first,
+        limit=limit,
+        offset=offset,
+    )
+
+    total = count_audit_events(str(merchant_id))
+
+    return AuditEventsListResponse(
+        merchant_id=str(merchant_id),
+        events=events,
+        total_count=total,
+        limit=limit,
+        offset=offset,
+        newest_first=newest_first,
+    )
+
+
+@router.get(
+    "/merchants/{merchant_id}/growth-opportunities/{opportunity_id}/audit-trail",
+    response_model=AuditTrailResponse,
+)
+def get_opportunity_audit_trail(
+    merchant_id: UUID,
+    opportunity_id: str,
+    db: Session = Depends(get_db),
+) -> AuditTrailResponse:
+    """Retrieve the complete lifecycle audit trail for a single opportunity.
+
+    Returns all audit events in chronological order (oldest first) to show
+    the full decision chain from creation to final state.
+
+    Enforces strict merchant isolation: events for another merchant are
+    never returned.
+    """
+    merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
+    if merchant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+
+    try:
+        events = get_audit_trail_for_opportunity(
+            str(merchant_id),
+            opportunity_id,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opportunity not found or no audit events exist",
+        )
+
+    return AuditTrailResponse(
+        merchant_id=str(merchant_id),
+        opportunity_id=opportunity_id,
+        events=events,
+        total_events=len(events),
+    )

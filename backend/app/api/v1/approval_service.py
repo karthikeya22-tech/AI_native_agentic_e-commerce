@@ -6,6 +6,9 @@ Manages the lifecycle of growth opportunity approvals:
 The execution gate validates approval status and guardrails before
 authorizing any downstream action. It does NOT perform the action itself.
 
+Audit events are delegated to the unified audit_service for a single,
+append-only, merchant-isolated audit trail.
+
 No LLM calls. No money actions. All operations are deterministic.
 """
 
@@ -14,6 +17,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
+from app.api.v1.audit_service import record_audit_event
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -21,7 +26,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _approvals: dict[str, dict[str, Any]] = {}
-_audit_events: list[dict[str, Any]] = []
 _lock = threading.RLock()
 
 VALID_STATUSES = ("proposed", "approved")
@@ -34,7 +38,6 @@ def reset_stores() -> None:
     """Clear all in-memory state. For test isolation only."""
     with _lock:
         _approvals.clear()
-        _audit_events.clear()
 
 
 def _make_key(merchant_id: str, opportunity_id: str) -> str:
@@ -51,16 +54,53 @@ def _record_audit(
     opportunity_id: str,
     **extra: Any,
 ) -> None:
-    event = {
-        "event_type": event_type,
-        "merchant_id": merchant_id,
-        "opportunity_id": opportunity_id,
-        "timestamp": _now_iso(),
-        **extra,
-    }
-    with _lock:
-        _audit_events.append(event)
-    logger.info("audit_event: %s merchant=%s opp=%s", event_type, merchant_id, opportunity_id)
+    """Delegate audit recording to the unified audit_service."""
+    # Map event_type to actor and status.
+    actor = "system"
+    status = ""
+    reason = ""
+
+    if event_type == "opportunity_created":
+        status = "proposed"
+        reason = "Catalog issue identified from deterministic readiness analysis"
+    elif event_type == "approval_granted":
+        actor = "merchant"
+        status = "approved"
+        reason = "Merchant explicitly approved proposed action"
+    elif event_type == "approval_denied":
+        actor = "merchant"
+        status = "denied"
+        reason = extra.get("reason", "Merchant explicitly denied approval")
+    elif event_type == "execution_denied":
+        status = "denied"
+        reason = extra.get("reason", "Execution gate denied authorization")
+    elif event_type == "execution_authorized":
+        status = "allowed"
+        reason = "Approval and guardrails validated"
+    else:
+        reason = extra.get("reason", "")
+
+    # Build metadata from extra fields.
+    metadata = {k: v for k, v in extra.items() if k != "reason"}
+
+    try:
+        record_audit_event(
+            event_type=event_type,
+            merchant_id=merchant_id,
+            opportunity_id=opportunity_id,
+            actor=actor,
+            status=status,
+            reason=reason,
+            metadata=metadata,
+        )
+    except Exception:
+        # Audit failure MUST NOT propagate to affect business logic.
+        logger.exception(
+            "audit_failure: Failed to record event %s for merchant=%s opp=%s",
+            event_type,
+            merchant_id,
+            opportunity_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -286,20 +326,25 @@ def check_execution_gate(
 
 
 # ---------------------------------------------------------------------------
-# Audit log access
+# Audit log access (delegates to unified audit_service)
 # ---------------------------------------------------------------------------
 
 def get_audit_events(
     merchant_id: str | None = None,
     opportunity_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return audit events, optionally filtered."""
-    with _lock:
-        events = list(_audit_events)
+    """Return audit events, optionally filtered.
+
+    Delegates to the unified audit_service for a single source of truth.
+    """
+    from app.api.v1.audit_service import get_audit_events_for_merchant
 
     if merchant_id is not None:
-        events = [e for e in events if e["merchant_id"] == merchant_id]
-    if opportunity_id is not None:
-        events = [e for e in events if e["opportunity_id"] == opportunity_id]
-
-    return events
+        return get_audit_events_for_merchant(
+            merchant_id,
+            opportunity_id=opportunity_id,
+            newest_first=False,
+            limit=10000,
+        )
+    # If no merchant_id, return empty (merchant isolation enforced).
+    return []
