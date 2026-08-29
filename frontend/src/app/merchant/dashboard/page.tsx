@@ -222,9 +222,12 @@ export default function MerchantDashboardPage() {
               AI Commerce Readiness
             </button>
 
-            <button className="block w-full rounded-xl px-4 py-3 text-left text-slate-600 hover:bg-slate-50">
+            <Link
+              href="/merchant/growth"
+              className="block rounded-xl px-4 py-3 text-slate-600 hover:bg-slate-50"
+            >
               Growth Opportunities
-            </button>
+            </Link>
 
             <button className="block w-full rounded-xl px-4 py-3 text-left text-slate-600 hover:bg-slate-50">
               Settings

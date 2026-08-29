@@ -8,7 +8,7 @@ const navigation: NavItem[] = [
   { name: 'Dashboard', href: '/merchant/dashboard', icon: 'dashboard' },
   { name: 'Products', href: '/merchant/products', icon: 'cube' },
   { name: 'AI Commerce Readiness', href: '/merchant/dashboard#readiness', icon: 'shield' },
-  { name: 'Growth Opportunities', href: '/merchant/dashboard#growth', icon: 'chart' },
+  { name: 'Growth Opportunities', href: '/merchant/growth', icon: 'chart' },
   { name: 'Settings', href: '/merchant/dashboard#settings', icon: 'cog' },
 ]
 
