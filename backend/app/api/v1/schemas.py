@@ -218,6 +218,31 @@ class ExecutionGateResponse(BaseModel):
     authorization_timestamp: str
 
 
+class SimulatedExecutionRequest(BaseModel):
+    discount_percent: float = Field(gt=0, le=100, description="Discount percentage (0-100)")
+
+
+class SimulatedDiscountResult(BaseModel):
+    discount_amount: str
+    final_price: str
+
+
+class SimulatedExecutionResponse(BaseModel):
+    execution_id: str
+    opportunity_id: str
+    merchant_id: str
+    action_type: str
+    original_value: str
+    requested_value: str
+    bounded_value: str
+    simulated_result: SimulatedDiscountResult
+    guardrails_checked: int
+    status: str
+    approval_required: bool = True
+    timestamp: str
+    disclaimer: str
+
+
 class BuyerChatRequest(BaseModel):
     merchant_id: UUID
     message: str = Field(min_length=1)

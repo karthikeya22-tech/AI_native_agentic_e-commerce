@@ -19,7 +19,20 @@ from app.api.v1.approval_service import (
     OpportunityNotFoundError,
     WrongMerchantError,
     approve_opportunity,
+    get_approval,
     record_opportunity_created,
+)
+from app.api.v1.simulated_execution_service import (
+    ExecutionError,
+    GuardrailViolationError,
+    IdempotentReplayError,
+    MalformedInputError,
+    MissingGuardrailsError,
+    NotApprovedError,
+    OpportunityNotFoundError as ExecOpportunityNotFoundError,
+    UnsupportedActionError,
+    WrongMerchantError as ExecWrongMerchantError,
+    execute_simulated_discount,
 )
 from app.api.v1.growth_opportunities_service import generate_growth_opportunities
 from app.api.v1.merchant_service import check_merchant_exists, create_merchant
@@ -35,6 +48,8 @@ from app.api.v1.schemas import (
     ProductCreate,
     ProductResponse,
     ReadinessResponse,
+    SimulatedExecutionRequest,
+    SimulatedExecutionResponse,
 )
 from app.db.session import get_db
 from app.models.merchant import Merchant, MerchantStatus
@@ -336,3 +351,116 @@ def approve_growth_opportunity(
         proposed_action=record["proposed_action"],
         guardrails=record["guardrails"],
     )
+
+
+@router.post(
+    "/merchants/{merchant_id}/growth-opportunities/{opportunity_id}/execute",
+    response_model=SimulatedExecutionResponse,
+)
+def execute_growth_opportunity(
+    merchant_id: UUID,
+    opportunity_id: str,
+    request: SimulatedExecutionRequest,
+    db: Session = Depends(get_db),
+) -> SimulatedExecutionResponse:
+    """Execute a simulated financial action for an approved growth opportunity.
+
+    This endpoint validates all guardrails and executes ONLY a simulated
+    discount calculation. No real payment, order, refund, or inventory
+    modification occurs. The product price in the database is never changed.
+    """
+    # Verify merchant exists.
+    merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
+    if merchant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+
+    # Retrieve approval record.
+    approval_record = get_approval(str(merchant_id), opportunity_id)
+    if approval_record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opportunity not found",
+        )
+
+    # Retrieve the product's original price (for the simulated action).
+    # We read the product to get the price but NEVER modify it.
+    products = (
+        db.query(Product)
+        .filter(Product.merchant_id == merchant_id)
+        .filter(Product.is_active.is_(True))
+        .all()
+    )
+    if not products:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active products found for this merchant",
+        )
+
+    # Use the average price of active products as the simulated base price.
+    from decimal import Decimal
+    prices = [Decimal(str(p.price)) for p in products if p.price is not None]
+    if not prices:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No valid product prices found for simulation",
+        )
+    avg_price = sum(prices) / len(prices)
+
+    try:
+        result = execute_simulated_discount(
+            merchant_id=str(merchant_id),
+            opportunity_id=opportunity_id,
+            discount_percent=request.discount_percent,
+            original_price=str(avg_price),
+            approval_record=approval_record,
+        )
+    except ExecOpportunityNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opportunity not found",
+        )
+    except ExecWrongMerchantError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opportunity not found",
+        )
+    except NotApprovedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        )
+    except UnsupportedActionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+    except MissingGuardrailsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+    except GuardrailViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+    except MalformedInputError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+    except IdempotentReplayError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        )
+    except ExecutionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+    return SimulatedExecutionResponse(**result)
