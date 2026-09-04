@@ -1,0 +1,566 @@
+import logging
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
+from app.ai.growth_service import (
+    RecommendationGenerationError,
+    generate_recommendations,
+)
+from app.ai.provider import LLMError, LLMProvider, get_llm_provider
+from app.api.v1.approval_service import (
+    ApprovalError,
+    ExplicitConsentRequiredError,
+    InvalidTransitionError,
+    OpportunityNotFoundError,
+    WrongMerchantError,
+    approve_opportunity,
+    get_approval,
+    record_opportunity_created,
+)
+from app.api.v1.audit_service import (
+    count_audit_events,
+    get_audit_events_for_merchant,
+    get_audit_trail_for_opportunity,
+    record_audit_event,
+)
+from app.api.v1.simulated_execution_service import (
+    ExecutionError,
+    GuardrailViolationError,
+    IdempotentReplayError,
+    MalformedInputError,
+    MissingGuardrailsError,
+    NotApprovedError,
+    OpportunityNotFoundError as ExecOpportunityNotFoundError,
+    UnsupportedActionError,
+    WrongMerchantError as ExecWrongMerchantError,
+    execute_simulated_discount,
+)
+from app.api.v1.growth_opportunities_service import generate_growth_opportunities
+from app.api.v1.merchant_service import check_merchant_exists, create_merchant
+from app.api.v1.readiness_service import analyze_readiness
+from app.api.v1.schemas import (
+    AuditEventsListResponse,
+    AuditTrailResponse,
+    GrowthOpportunitiesResponse,
+    GrowthRecommendationsResponse,
+    MerchantOnboardingRequest,
+    MerchantOnboardingResponse,
+    MerchantSummary,
+    OpportunityApprovalRequest,
+    OpportunityApprovalResponse,
+    ProductCreate,
+    ProductResponse,
+    ReadinessResponse,
+    SimulatedExecutionRequest,
+    SimulatedExecutionResponse,
+)
+from app.db.session import get_db
+from app.models.merchant import Merchant, MerchantStatus
+from app.models.product import Product
+
+router = APIRouter(prefix="/api/v1", tags=["merchants"])
+
+
+@router.get(
+    "/merchants",
+    response_model=list[MerchantSummary],
+)
+def list_active_merchants(
+    db: Session = Depends(get_db),
+) -> list[MerchantSummary]:
+    merchants = (
+        db.query(Merchant)
+        .filter(Merchant.status == MerchantStatus.ACTIVE)
+        .all()
+    )
+    return [MerchantSummary.model_validate(m) for m in merchants]
+
+
+@router.post(
+    "/merchants",
+    response_model=MerchantOnboardingResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def onboard_merchant(
+    request: MerchantOnboardingRequest,
+    db: Session = Depends(get_db),
+) -> MerchantOnboardingResponse:
+    if check_merchant_exists(db, request.email):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A merchant with this email already exists",
+        )
+
+    try:
+        user_id, merchant_id = create_merchant(db, request)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A merchant with this email already exists",
+        )
+
+    return MerchantOnboardingResponse(
+        user_id=str(user_id),
+        merchant_id=str(merchant_id),
+        name=request.name,
+        status=MerchantStatus.ACTIVE.value,
+    )
+
+
+@router.get(
+    "/merchants/{merchant_id}/products",
+    response_model=list[ProductResponse],
+)
+def list_merchant_products(
+    merchant_id: UUID,
+    include_inactive: bool = Query(False, description="Include inactive products"),
+    db: Session = Depends(get_db),
+) -> list[ProductResponse]:
+    merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
+    if merchant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+
+    query = db.query(Product).filter(Product.merchant_id == merchant_id)
+    if not include_inactive:
+        query = query.filter(Product.is_active.is_(True))
+    products = query.order_by(Product.created_at.desc()).all()
+
+    return [ProductResponse.model_validate(p) for p in products]
+
+
+@router.post(
+    "/merchants/{merchant_id}/products",
+    response_model=ProductResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_product_for_merchant(
+    merchant_id: UUID,
+    payload: ProductCreate,
+    db: Session = Depends(get_db),
+) -> ProductResponse:
+    merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
+    if merchant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+
+    product = Product(
+        merchant_id=merchant_id,
+        name=payload.name,
+        description=payload.description,
+        category=payload.category,
+        price=payload.price,
+        currency=payload.currency,
+        inventory_quantity=payload.inventory_quantity,
+        delivery_info=payload.delivery_info,
+        return_policy=payload.return_policy,
+        is_active=True,
+    )
+    db.add(product)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unable to create product",
+        )
+
+    db.refresh(product)
+    return ProductResponse.model_validate(product)
+
+
+@router.get(
+    "/merchants/{merchant_id}/readiness",
+    response_model=ReadinessResponse,
+)
+def get_merchant_readiness(
+    merchant_id: UUID,
+    db: Session = Depends(get_db),
+) -> ReadinessResponse:
+    merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
+    if merchant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+
+    products = (
+        db.query(Product)
+        .filter(Product.merchant_id == merchant_id)
+        .filter(Product.is_active.is_(True))
+        .all()
+    )
+
+    overall_score, products_analyzed, issues = analyze_readiness(products)
+
+    return ReadinessResponse(
+        merchant_id=str(merchant_id),
+        overall_score=overall_score,
+        products_analyzed=products_analyzed,
+        issues_count=len(issues),
+        issues=issues,
+    )
+
+
+@router.get(
+    "/merchants/{merchant_id}/growth-recommendations",
+    response_model=GrowthRecommendationsResponse,
+)
+def get_growth_recommendations(
+    merchant_id: UUID,
+    db: Session = Depends(get_db),
+    llm_provider: LLMProvider = Depends(get_llm_provider),
+) -> GrowthRecommendationsResponse:
+    merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
+    if merchant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+
+    products = (
+        db.query(Product)
+        .filter(Product.merchant_id == merchant_id)
+        .filter(Product.is_active.is_(True))
+        .all()
+    )
+
+    _, _, issues = analyze_readiness(products)
+
+    try:
+        recommendations = generate_recommendations(issues, llm_provider)
+    except RecommendationGenerationError:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="AI service returned an unusable response.",
+        )
+    except LLMError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI recommendation service is temporarily unavailable.",
+        )
+
+    return GrowthRecommendationsResponse(
+        merchant_id=str(merchant_id),
+        recommendations=recommendations,
+    )
+
+
+@router.post(
+    "/merchants/{merchant_id}/growth-opportunities",
+    response_model=GrowthOpportunitiesResponse,
+)
+def get_growth_opportunities(
+    merchant_id: UUID,
+    db: Session = Depends(get_db),
+) -> GrowthOpportunitiesResponse:
+    merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
+    if merchant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+
+    products = (
+        db.query(Product)
+        .filter(Product.merchant_id == merchant_id)
+        .filter(Product.is_active.is_(True))
+        .all()
+    )
+
+    _, _, issues = analyze_readiness(products)
+
+    try:
+        opportunities = generate_growth_opportunities(
+            str(merchant_id), products, issues
+        )
+    except Exception:
+        logger.exception("Growth opportunity generation failed for merchant %s", merchant_id)
+        return GrowthOpportunitiesResponse(
+            merchant_id=str(merchant_id),
+            opportunities=[],
+        )
+
+    # Register each opportunity in the approval store.
+    for opp in opportunities:
+        record_opportunity_created(
+            str(merchant_id),
+            opp["opportunity_id"],
+            opp["proposed_action"],
+            opp["guardrails"],
+        )
+
+    return GrowthOpportunitiesResponse(
+        merchant_id=str(merchant_id),
+        opportunities=opportunities,
+    )
+
+
+@router.post(
+    "/merchants/{merchant_id}/growth-opportunities/{opportunity_id}/approve",
+    response_model=OpportunityApprovalResponse,
+)
+def approve_growth_opportunity(
+    merchant_id: UUID,
+    opportunity_id: str,
+    request: OpportunityApprovalRequest,
+) -> OpportunityApprovalResponse:
+    try:
+        record = approve_opportunity(
+            str(merchant_id),
+            opportunity_id,
+            approved=request.approved,
+            approved_by=request.approved_by,
+        )
+    except OpportunityNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opportunity not found",
+        )
+    except WrongMerchantError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opportunity not found",
+        )
+    except InvalidTransitionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        )
+    except ExplicitConsentRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+    except ApprovalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+    return OpportunityApprovalResponse(
+        opportunity_id=record["opportunity_id"],
+        merchant_id=record["merchant_id"],
+        status=record["status"],
+        approved_by=record["approved_by"],
+        approved_at=record["approved_at"],
+        proposed_action=record["proposed_action"],
+        guardrails=record["guardrails"],
+    )
+
+
+@router.post(
+    "/merchants/{merchant_id}/growth-opportunities/{opportunity_id}/execute",
+    response_model=SimulatedExecutionResponse,
+)
+def execute_growth_opportunity(
+    merchant_id: UUID,
+    opportunity_id: str,
+    request: SimulatedExecutionRequest,
+    db: Session = Depends(get_db),
+) -> SimulatedExecutionResponse:
+    """Execute a simulated financial action for an approved growth opportunity.
+
+    This endpoint validates all guardrails and executes ONLY a simulated
+    discount calculation. No real payment, order, refund, or inventory
+    modification occurs. The product price in the database is never changed.
+    """
+    # Verify merchant exists.
+    merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
+    if merchant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+
+    # Retrieve approval record.
+    approval_record = get_approval(str(merchant_id), opportunity_id)
+    if approval_record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opportunity not found",
+        )
+
+    # Retrieve the product's original price (for the simulated action).
+    # We read the product to get the price but NEVER modify it.
+    products = (
+        db.query(Product)
+        .filter(Product.merchant_id == merchant_id)
+        .filter(Product.is_active.is_(True))
+        .all()
+    )
+    if not products:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active products found for this merchant",
+        )
+
+    # Use the average price of active products as the simulated base price.
+    from decimal import Decimal
+    prices = [Decimal(str(p.price)) for p in products if p.price is not None]
+    if not prices:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No valid product prices found for simulation",
+        )
+    avg_price = sum(prices) / len(prices)
+
+    try:
+        result = execute_simulated_discount(
+            merchant_id=str(merchant_id),
+            opportunity_id=opportunity_id,
+            discount_percent=request.discount_percent,
+            original_price=str(avg_price),
+            approval_record=approval_record,
+        )
+    except ExecOpportunityNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opportunity not found",
+        )
+    except ExecWrongMerchantError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opportunity not found",
+        )
+    except NotApprovedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        )
+    except UnsupportedActionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+    except MissingGuardrailsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+    except GuardrailViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+    except MalformedInputError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+    except IdempotentReplayError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        )
+    except ExecutionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+    return SimulatedExecutionResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# Audit Trail endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/merchants/{merchant_id}/audit-events",
+    response_model=AuditEventsListResponse,
+)
+def list_merchant_audit_events(
+    merchant_id: UUID,
+    opportunity_id: str | None = Query(None, description="Filter by opportunity ID"),
+    newest_first: bool = Query(True, description="Return events newest-first"),
+    limit: int = Query(100, ge=1, le=1000, description="Max events to return"),
+    offset: int = Query(0, ge=0, description="Events to skip for pagination"),
+    db: Session = Depends(get_db),
+) -> AuditEventsListResponse:
+    """List audit events for a merchant with pagination and optional filtering.
+
+    Supports chronological ordering, newest-first ordering, opportunity
+    filtering, and standard offset/limit pagination.
+    """
+    merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
+    if merchant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+
+    events = get_audit_events_for_merchant(
+        str(merchant_id),
+        opportunity_id=opportunity_id,
+        newest_first=newest_first,
+        limit=limit,
+        offset=offset,
+    )
+
+    total = count_audit_events(str(merchant_id))
+
+    return AuditEventsListResponse(
+        merchant_id=str(merchant_id),
+        events=events,
+        total_count=total,
+        limit=limit,
+        offset=offset,
+        newest_first=newest_first,
+    )
+
+
+@router.get(
+    "/merchants/{merchant_id}/growth-opportunities/{opportunity_id}/audit-trail",
+    response_model=AuditTrailResponse,
+)
+def get_opportunity_audit_trail(
+    merchant_id: UUID,
+    opportunity_id: str,
+    db: Session = Depends(get_db),
+) -> AuditTrailResponse:
+    """Retrieve the complete lifecycle audit trail for a single opportunity.
+
+    Returns all audit events in chronological order (oldest first) to show
+    the full decision chain from creation to final state.
+
+    Enforces strict merchant isolation: events for another merchant are
+    never returned.
+    """
+    merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
+    if merchant is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Merchant not found",
+        )
+
+    try:
+        events = get_audit_trail_for_opportunity(
+            str(merchant_id),
+            opportunity_id,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Opportunity not found or no audit events exist",
+        )
+
+    return AuditTrailResponse(
+        merchant_id=str(merchant_id),
+        opportunity_id=opportunity_id,
+        events=events,
+        total_events=len(events),
+    )
