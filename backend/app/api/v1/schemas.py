@@ -314,3 +314,55 @@ class BuyerChatResponse(BaseModel):
     merchant_id: str
     message: str
     products: list[BuyerChatProduct]
+
+
+# ---------------------------------------------------------------------------
+# Checkout / Order schemas
+# ---------------------------------------------------------------------------
+
+
+class CheckoutRequest(BaseModel):
+    """Request to create a pending order and Razorpay payment order."""
+    merchant_id: UUID
+    product_id: UUID
+    quantity: int = Field(ge=1, description="Number of units (must be >= 1)")
+
+
+class CheckoutResponse(BaseModel):
+    """Response with order details and Razorpay order info."""
+    order_id: str
+    razorpay_order_id: str
+    razorpay_key_id: str
+    amount_paise: int
+    currency: str
+    product_name: str
+    unit_price: str
+    total_amount: str
+    quantity: int
+    merchant_name: str
+    status: str
+    environment: str = "TEST_MODE"
+
+
+class PaymentVerifyRequest(BaseModel):
+    """Request to verify payment after Razorpay checkout."""
+    order_id: UUID
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+class PaymentVerifyResponse(BaseModel):
+    """Response after payment verification."""
+    order_id: str
+    status: str
+    razorpay_payment_id: str | None = None
+    total_amount: str | None = None
+    idempotent: bool = False
+
+
+class WebhookResponse(BaseModel):
+    """Response for webhook processing."""
+    status: str
+    order_id: str | None = None
+    reason: str | None = None

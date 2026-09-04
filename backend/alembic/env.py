@@ -18,7 +18,7 @@ if str(BACKEND_DIR) not in sys.path:
 # -------------------------------------------------------------------
 from app.core.config import get_settings
 from app.db.session import Base
-from app.models import User, Merchant, Product, MerchantPolicy  # noqa: F401
+from app.models import User, Merchant, Product, MerchantPolicy, Order  # noqa: F401
 
 
 # -------------------------------------------------------------------

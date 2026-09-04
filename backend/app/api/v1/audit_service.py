@@ -61,6 +61,15 @@ VALID_EVENT_TYPES = frozenset({
     "execution_denied",
     "simulated_action_completed",
     "llm_failure",
+    # Checkout / payment events
+    "checkout_started",
+    "order_created",
+    "payment_order_created",
+    "payment_verification_requested",
+    "payment_verified",
+    "payment_failed",
+    "order_paid",
+    "inventory_updated",
 })
 
 

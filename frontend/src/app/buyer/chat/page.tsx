@@ -2,26 +2,49 @@
 
 import { useEffect, useState, useRef } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useBuyerChat } from "@/hooks/useBuyerChat";
 import type { ChatMessage, BuyerChatProduct } from "@/types/buyer-chat";
 
 const FALLBACK_MERCHANT_NAME = "the store";
 
-function ProductCard({ product }: { product: BuyerChatProduct }) {
+function ProductCard({
+  product,
+  merchantId,
+}: {
+  product: BuyerChatProduct;
+  merchantId: string;
+}) {
+  const router = useRouter();
   const formattedPrice = new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: product.currency,
   }).format(parseFloat(product.price));
 
+  function handleBuyNow() {
+    const params = new URLSearchParams({
+      product_id: product.product_id,
+      merchant_id: merchantId,
+      product_name: product.name,
+      quantity: "1",
+    });
+    router.push(`/buyer/checkout?${params.toString()}`);
+  }
+
   return (
     <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
       <p className="font-semibold text-slate-900">{product.name}</p>
-      <p className="mt-1 text-sm text-slate-600">
-        {formattedPrice}
-      </p>
+      <p className="mt-1 text-sm text-slate-600">{formattedPrice}</p>
       <p className="mt-1 text-xs text-slate-400">
         Relevance: {Math.round(product.similarity * 100)}%
       </p>
+      <button
+        type="button"
+        onClick={handleBuyNow}
+        className="mt-3 w-full rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-indigo-700"
+      >
+        Buy Now (Test Mode)
+      </button>
     </div>
   );
 }
@@ -151,7 +174,11 @@ export default function BuyerChatPage() {
                     {message.products && message.products.length > 0 && (
                       <div className="mt-3 space-y-2">
                         {message.products.map((product) => (
-                          <ProductCard key={product.product_id} product={product} />
+                          <ProductCard
+                            key={product.product_id}
+                            product={product}
+                            merchantId={merchantId}
+                          />
                         ))}
                       </div>
                     )}

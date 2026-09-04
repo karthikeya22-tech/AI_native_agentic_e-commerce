@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://api.openai.com/v1"
     LLM_TIMEOUT_SECONDS: float = 30.0
 
+    # Razorpay TEST MODE credentials (never commit real keys)
+    RAZORPAY_KEY_ID: str = ""
+    RAZORPAY_KEY_SECRET: str = ""
+    RAZORPAY_WEBHOOK_SECRET: str = ""
+
     class Config:
         env_file = str(ENV_PATH)
         env_file_encoding = "utf-8"
